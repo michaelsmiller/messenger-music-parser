@@ -6,7 +6,9 @@ authors = [
     {name = "Michael Miller", email = "michaelsmiller2@gmail.com"},
 ]
 dependencies = [
-    "youtube-dl>=2021.12.17",
+    "loguru>=0.7.2",
+    "yt-dlp>=2024.5.27",
+    "ffmpeg>=1.4",
 ]
 requires-python = ">=3.12"
 readme = "README.md"
@@ -19,3 +21,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.pdm]
 distribution = true
+
+[tool.pdm.scripts]
+main.cmd = "src/facebook/main.py"
+
