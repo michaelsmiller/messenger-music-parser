@@ -1,0 +1,21 @@
+[project]
+name = "facebook"
+version = "0.1.0"
+description = "Parses Facbook Messenger JSON dumps for youtube videos and their reactions"
+authors = [
+    {name = "Michael Miller", email = "michaelsmiller2@gmail.com"},
+]
+dependencies = [
+    "youtube-dl>=2021.12.17",
+]
+requires-python = ">=3.12"
+readme = "README.md"
+license = {text = "MIT"}
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
+[tool.pdm]
+distribution = true
