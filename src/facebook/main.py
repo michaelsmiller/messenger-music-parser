@@ -3,6 +3,7 @@
 from __future__ import unicode_literals
 import json
 import yt_dlp
+from yt_dlp.utils import ExtractorError, DownloadError
 from loguru import logger
 from argparse import ArgumentParser
 from typing import Any, Optional
@@ -17,12 +18,14 @@ class Reaction(IntEnum):
     DOWNTHUMB = -1
     ANGRY = -2
 
-REACTION_TO_EMOJI = {
-    Reaction.HEART: "❤",
-    Reaction.UPTHUMB: "👍",
+EMOJI_TO_REACTION = {
+    b'\xe2\x9d\xa4': Reaction.HEART,
+    b'\xf0\x9f\x98\x8d': Reaction.HEART,
+    b'\xf0\x9f\x91\x8d': Reaction.UPTHUMB,
+    b'\xf0\x9f\x98\x86': Reaction.LAUGH,
+    b'\xf0\x9f\x91\x8e': Reaction.DOWNTHUMB,
+    b'\xf0\x9f\x98\xa0': Reaction.ANGRY,
 }
-
-EMOJI_TO_REACTION = {v: k for k,v in REACTION_TO_EMOJI.items()}
 
 @dataclass(kw_only=True)
 class Recommendation:
@@ -39,55 +42,103 @@ class Recommendation:
     reactions: dict[str, Reaction] = dataclass_field(default_factory=dict)
     title: Optional[str] = None
 
-# 1. Youtube link regex
-# 2. Filter all messages with 1 youtube link
-#   - Make sure the cases not caught don't matter
-# 3. Store JSON with all info for every line
 # 4. Run youtube extraction for titles/channels on every single file
 #   - Create a cache file for this stuff
 # 5. Parse reactions
 
 LINK_REGEXES = (
-    re.compile(r'((https?://)?(www\.)?youtube.com/(watch\?&?(\w+=\S+)*v=)?(?P<id>[\w-]{11})\S*)'),
-    re.compile(r'((https?://)?(www\.)?youtu.be/(?P<id>[\w-]{11})\S*)'),
-    re.compile(r'((https?://)?(www\.)?youtube.com/(playlist\?(\w+=\S+)*list=)?(?P<playlist_id>[\w-]{34})\S*)'),
+    re.compile(R'((https?://)?(www\.)?youtube.com/(watch\?&?(\w+=\S+)*v=)?(?P<id>[\w-]{11})\S*)'),
+    re.compile(R'((https?://)?(www\.)?youtu.be/(?P<id>[\w-]{11})\S*)'),
+    re.compile(R'((https?://)?(www\.)?youtube.com/(playlist\?(\w+=\S+)*list=)?(?P<playlist_id>[\w-]{34})\S*)'),
 )
 
-def main(filepath: str, use_cache_processed: bool = False):
+def read_recommendations(filepath: str) -> list[Recommendation]:
+    with open(filepath) as f:
+        s = f.read()
+    data = json.loads(s)
+    logger.info(f"Reading {len(data)} recommendations from file {filepath}")
+    assert isinstance(data, list)
+    recommendations = [Recommendation(**params) for params in data]
+    return recommendations
+
+def write_recommendations(recommendations: list[Recommendation], filename: str):
+    recommendations_string = json.dumps([asdict(rec) for rec in recommendations], indent=2)
+    logger.info(f"Writing {len(recommendations)} recommendations to file {filename}")
+    with open(filename, 'w') as f:
+        f.write(recommendations_string)
+
+def main(filepath: str, read_from_cache: bool = False, read_from_messenger: bool = True):
+    CACHE_FILEPATH = "cache/processed.json"
     with open(filepath) as f:
         s = f.read()
     data = json.loads(s)
 
     messages = data["messages"]
     recommendations = []
-    for message in messages:
-        parse_message(recommendations, message)
+    if read_from_cache:
+        recommendations = read_recommendations(CACHE_FILEPATH)
 
-    def save_recommendations(recommendations: list[Recommendation], filename: str):
-        recommendations_string = json.dumps([asdict(rec) for rec in recommendations], indent=2)
-        with open(filename, 'w') as f:
-            f.write(recommendations_string)
+    unique_keys = set()
+    for r in recommendations:
+        key = r.video_id or r.playlist_id
+        assert key is not None
+        unique_keys.add(key)
 
-    cache_file_name = "cache/unprocessed.json"
-    logger.info(f"Writing unprocessed recommendations to {cache_file_name}")
-    save_recommendations(recommendations, cache_file_name)
+    if read_from_messenger:
+        for message in messages:
+            r = parse_message(message)
+            if r is None:
+                continue
+            key = r.video_id or r.playlist_id
+            if key in unique_keys:
+                continue
+            unique_keys.add(key)
+            recommendations.append(r)
+
+    recommendations = sorted(recommendations, key=lambda r: r.timestamp)
+
+    # Extract the titles from the links
+
+    youtube_options = {
+        "dump_single_json": True,
+        "simulate": True,
+        "logger": logger,
+    }
+    with yt_dlp.YoutubeDL(youtube_options) as youtube:
+        for i, recommendation in enumerate(recommendations):
+            if recommendation.title is not None:
+                logger.debug(f"Skipping {recommendation.title}")
+                continue
+            logger.info(f"Getting link info: {recommendation.url}")
+            try:
+                youtube_info = youtube.extract_info(recommendation.url, download=False, process=False)
+            except (ExtractorError, DownloadError) as e:
+                logger.warning(f"{e.__class__.__name__}: Could not extract {recommendation.url}")
+                continue
+            recommendation.title = youtube_info["title"]
+
+            if i > 0 and i % 100 == 0:
+                write_recommendations(recommendations, CACHE_FILEPATH)
+    write_recommendations(recommendations, CACHE_FILEPATH)
 
 
-def parse_message(recommendations: list[Recommendation], message: dict[str, Any]):
-    def decode(s: str) -> str:
-        return s.encode("latin-1").decode("utf-8")
+
+def decode(s: str, encoding: str="utf-8") -> str:
+    return s.encode("latin-1").decode(encoding)
+
+def parse_message(message: dict[str, Any]):
 
     if "content" not in message:
-        return
+        return None
     content = decode(message["content"])
 
     # Filter out messages that don't have youtube links
     if "youtube.com" not in content and "youtu.be" not in content:
-        return
+        return None
     # We just ignore links that are URLsafe, because this means they're nested
     # in another link and I don't need to deal with that
     if r"youtu.be%2F" in content:
-        return
+        return None
 
     regex_matches = []
     for regex in LINK_REGEXES:
@@ -96,12 +147,12 @@ def parse_message(recommendations: list[Recommendation], message: dict[str, Any]
 
     if not regex_matches:
         logger.warning(f"No youtube links found in message: {content}")
-        return
+        return None
     if len(regex_matches) > 1:
         n = len(regex_matches)
         urls = [m[0] for m in regex_matches]
         # logger.warning(f"{n} URLs in message.\nURLs: {urls}\nFull message: {content}")
-        return
+        return None
 
     # Parse youtube link
     m = regex_matches[0]
@@ -117,7 +168,6 @@ def parse_message(recommendations: list[Recommendation], message: dict[str, Any]
         assert len(playlist_id) == 34
         url = f"https://www.youtube.com/playlist?list={playlist_id}"
 
-
     recommendation = Recommendation(
         sender=message["sender_name"],
         timestamp=message["timestamp_ms"],
@@ -129,26 +179,18 @@ def parse_message(recommendations: list[Recommendation], message: dict[str, Any]
     )
     for reaction_data in message.get("reactions", []):
         actor = reaction_data["actor"]
-        emoji = decode(reaction_data["reaction"])
+        emoji_bytes = reaction_data["reaction"].encode("latin1")
 
-        reaction = EMOJI_TO_REACTION.get(emoji, None)
+        reaction = EMOJI_TO_REACTION.get(emoji_bytes, None)
         if reaction is None:
+            # emoji_utf8 = emoji_bytes.decode("utf-8")
+            # logger.warning(f"Ignoring {emoji_utf8}")
             continue
         recommendation.reactions[actor] = reaction
-    recommendations.append(recommendation)
+    return recommendation
 
 
 if __name__ == "__main__":
     filepath = 'data/music_chat_20230409.json'
-    main(filepath)
+    main(filepath, read_from_messenger=False, read_from_cache=True)
 
-# youtube_options = {
-#     "dump_single_json": True,
-#     "simulate": True,
-#     "logger": logger,
-# }
-
-# with yt_dlp.YoutubeDL(youtube_options) as youtube:
-#     url = "https://www.youtube.com/watch?v=VgwrEg_xdd0"
-#     all_info = youtube.extract_info(url, download=False, process=False)
-#     title = all_info["title"]
