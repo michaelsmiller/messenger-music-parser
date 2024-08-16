@@ -2,7 +2,7 @@
 
 from __future__ import unicode_literals
 import json
-import yt_dlp
+from yt_dlp import YoutubeDL
 from yt_dlp.utils import ExtractorError, DownloadError
 from loguru import logger
 from argparse import ArgumentParser
@@ -10,6 +10,9 @@ from typing import Any, Optional
 from dataclasses import dataclass, field as dataclass_field, asdict
 import re
 from enum import StrEnum, auto, IntEnum
+from argparse import ArgumentParser
+from pathlib import Path
+import sys
 
 class Reaction(IntEnum):
     LAUGH = 0
@@ -19,8 +22,8 @@ class Reaction(IntEnum):
     ANGRY = -2
 
 EMOJI_TO_REACTION = {
-    b'\xe2\x9d\xa4': Reaction.HEART,
-    b'\xf0\x9f\x98\x8d': Reaction.HEART,
+    b'\xe2\x9d\xa4'    : Reaction.HEART, # Heart
+    b'\xf0\x9\x98\x8d': Reaction.HEART, # Heart Eyes
     b'\xf0\x9f\x91\x8d': Reaction.UPTHUMB,
     b'\xf0\x9f\x98\x86': Reaction.LAUGH,
     b'\xf0\x9f\x91\x8e': Reaction.DOWNTHUMB,
@@ -42,40 +45,36 @@ class Recommendation:
     reactions: dict[str, Reaction] = dataclass_field(default_factory=dict)
     title: Optional[str] = None
 
-# 4. Run youtube extraction for titles/channels on every single file
-#   - Create a cache file for this stuff
-# 5. Parse reactions
-
 LINK_REGEXES = (
     re.compile(R'((https?://)?(www\.)?youtube.com/(watch\?&?(\w+=\S+)*v=)?(?P<id>[\w-]{11})\S*)'),
     re.compile(R'((https?://)?(www\.)?youtu.be/(?P<id>[\w-]{11})\S*)'),
     re.compile(R'((https?://)?(www\.)?youtube.com/(playlist\?(\w+=\S+)*list=)?(?P<playlist_id>[\w-]{34})\S*)'),
 )
 
-def read_recommendations(filepath: str) -> list[Recommendation]:
-    with open(filepath) as f:
+def read_recommendations(path: Path) -> list[Recommendation]:
+    if not path.exists():
+        logger.warning(f"Attempted to parse nonexistent file {path}. Skipping...")
+        return []
+
+    with path.open() as f:
         s = f.read()
     data = json.loads(s)
-    logger.info(f"Reading {len(data)} recommendations from file {filepath}")
+    logger.debug(f"Reading {len(data)} recommendations from file {path}")
     assert isinstance(data, list)
     recommendations = [Recommendation(**params) for params in data]
     return recommendations
 
-def write_recommendations(recommendations: list[Recommendation], filename: str):
+def write_recommendations(recommendations: list[Recommendation], path: Path):
     recommendations_string = json.dumps([asdict(rec) for rec in recommendations], indent=2)
-    logger.info(f"Writing {len(recommendations)} recommendations to file {filename}")
-    with open(filename, 'w') as f:
+    logger.debug(f"Writing {len(recommendations)} recommendations to file {path}")
+    with path.open('w') as f:
         f.write(recommendations_string)
 
-def main(filepath: str, read_from_cache: bool = False, read_from_messenger: bool = True):
-    CACHE_FILEPATH = "cache/processed.json"
-    with open(filepath) as f:
-        s = f.read()
-    data = json.loads(s)
-
-    messages = data["messages"]
-    recommendations = []
-    if read_from_cache:
+def main(messenger_filepath: Optional[str], ignore_cache: bool = False):
+    CACHE_FILEPATH = Path("cache/processed.json")
+    recommendations: list[Recommendation] = []
+    if not ignore_cache:
+        logger.debug(f"Reading in from cache at {CACHE_FILEPATH}")
         recommendations = read_recommendations(CACHE_FILEPATH)
 
     unique_keys = set()
@@ -84,7 +83,11 @@ def main(filepath: str, read_from_cache: bool = False, read_from_messenger: bool
         assert key is not None
         unique_keys.add(key)
 
-    if read_from_messenger:
+    if messenger_filepath is not None:
+        with open(messenger_filepath) as f:
+            s = f.read()
+        data = json.loads(s)
+        messages = data["messages"]
         for message in messages:
             r = parse_message(message)
             if r is None:
@@ -104,7 +107,7 @@ def main(filepath: str, read_from_cache: bool = False, read_from_messenger: bool
         "simulate": True,
         "logger": logger,
     }
-    with yt_dlp.YoutubeDL(youtube_options) as youtube:
+    with YoutubeDL(youtube_options) as youtube:
         for i, recommendation in enumerate(recommendations):
             if recommendation.title is not None:
                 logger.debug(f"Skipping {recommendation.title}")
@@ -122,12 +125,11 @@ def main(filepath: str, read_from_cache: bool = False, read_from_messenger: bool
     write_recommendations(recommendations, CACHE_FILEPATH)
 
 
-
 def decode(s: str, encoding: str="utf-8") -> str:
     return s.encode("latin-1").decode(encoding)
 
-def parse_message(message: dict[str, Any]):
 
+def parse_message(message: dict[str, Any]) -> Recommendation:
     if "content" not in message:
         return None
     content = decode(message["content"])
@@ -183,14 +185,22 @@ def parse_message(message: dict[str, Any]):
 
         reaction = EMOJI_TO_REACTION.get(emoji_bytes, None)
         if reaction is None:
-            # emoji_utf8 = emoji_bytes.decode("utf-8")
-            # logger.warning(f"Ignoring {emoji_utf8}")
+            emoji_utf8 = emoji_bytes.decode("utf-8")
+            logger.info(f"Ignoring '{emoji_bytes}' {emoji_utf8}")
             continue
         recommendation.reactions[actor] = reaction
     return recommendation
 
 
 if __name__ == "__main__":
-    filepath = 'data/music_chat_20230409.json'
-    main(filepath, read_from_messenger=False, read_from_cache=True)
+    parser = ArgumentParser()
+    parser.add_argument("--ignore-cache", default=False, action="store_true", help="Ignore existing cache file")
+    parser.add_argument("--verbose", '-v', default=False, action="store_true")
+    parser.add_argument("filepath", nargs="?", default=None, help="The filepath of the Messenger JSON")
+    args = parser.parse_args()
 
+    log_level = "DEBUG" if args.verbose else "INFO"
+    logger.remove()
+    logger.add(sys.stderr, format="<b><cyan>{time:YYYY-MM-DD HH:mm:ss!UTC}</cyan> <white>{level: <8}</> {message}</b>", level=log_level)
+
+    main(args.filepath, ignore_cache=args.ignore_cache)
