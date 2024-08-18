@@ -23,7 +23,7 @@ class Reaction(IntEnum):
 
 EMOJI_TO_REACTION = {
     b'\xe2\x9d\xa4'    : Reaction.HEART, # Heart
-    b'\xf0\x9\x98\x8d': Reaction.HEART, # Heart Eyes
+    b'\xf0\x9f\x98\x8d': Reaction.HEART, # Heart Eyes
     b'\xf0\x9f\x91\x8d': Reaction.UPTHUMB,
     b'\xf0\x9f\x98\x86': Reaction.LAUGH,
     b'\xf0\x9f\x91\x8e': Reaction.DOWNTHUMB,
@@ -78,11 +78,6 @@ def main(messenger_filepath: Optional[str], ignore_cache: bool = False):
         recommendations = read_recommendations(CACHE_FILEPATH)
 
     unique_keys = set()
-    for r in recommendations:
-        key = r.video_id or r.playlist_id
-        assert key is not None
-        unique_keys.add(key)
-
     if messenger_filepath is not None:
         with open(messenger_filepath) as f:
             s = f.read()
@@ -97,6 +92,11 @@ def main(messenger_filepath: Optional[str], ignore_cache: bool = False):
                 continue
             unique_keys.add(key)
             recommendations.append(r)
+
+    for r in recommendations:
+        key = r.video_id or r.playlist_id
+        assert key is not None
+        unique_keys.add(key)
 
     recommendations = sorted(recommendations, key=lambda r: r.timestamp)
 
@@ -179,6 +179,7 @@ def parse_message(message: dict[str, Any]) -> Recommendation:
         video_id = video_id,
         playlist_id = playlist_id,
     )
+
     for reaction_data in message.get("reactions", []):
         actor = reaction_data["actor"]
         emoji_bytes = reaction_data["reaction"].encode("latin1")
@@ -186,7 +187,7 @@ def parse_message(message: dict[str, Any]) -> Recommendation:
         reaction = EMOJI_TO_REACTION.get(emoji_bytes, None)
         if reaction is None:
             emoji_utf8 = emoji_bytes.decode("utf-8")
-            logger.info(f"Ignoring '{emoji_bytes}' {emoji_utf8}")
+            logger.debug(f"Ignoring {emoji_bytes} ({emoji_utf8})")
             continue
         recommendation.reactions[actor] = reaction
     return recommendation
